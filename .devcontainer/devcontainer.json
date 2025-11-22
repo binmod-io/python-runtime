@@ -1,0 +1,21 @@
+{
+    "name": "binmod-runtime-py",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "..",
+		"args": {
+			"VARIANT": "1.91_3.12"
+		}
+    },
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.mypy-type-checker",
+				"charliemarsh.ruff"
+			]
+		}
+	},
+	"postCreateCommand": "uv sync --all-packages --frozen && uv run pre-commit install --install-hooks",
+	"remoteUser": "dev"
+}

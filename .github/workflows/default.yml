@@ -1,0 +1,78 @@
+name: default
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - dev
+    tags-ignore:
+      - '**'
+
+jobs:
+  lint-commit:
+    if: "!contains(github.event.head_commit.message, '[skip-ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: "3.43.3"
+
+      - name: Lint commit message
+        run: |
+          pip install gitlint
+          git log -1 --pretty=%B | gitlint
+
+  lint-code:
+    if: "!contains(github.event.head_commit.message, '[skip-ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: "3.43.3"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev --all-packages
+
+      - name: Lint code
+        run: uv run task python:lint

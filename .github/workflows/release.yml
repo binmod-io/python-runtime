@@ -1,0 +1,104 @@
+name: release
+
+on:
+  push:
+    tags: ["*"]
+
+jobs:
+  publish-wheel:
+    if: |
+      !contains(github.event.head_commit.message, '[skip-ci]') &&
+      github.repository == 'binmod-io/python-runtime'
+    name: Publish wheel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: "3.43.3"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev --all-packages
+
+      - name: Build wheel
+        run: uv run task python:build
+
+      - name: Publish wheel
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish
+
+  make-release:
+    if: |
+      !contains(github.event.head_commit.message, '[skip-ci]') &&
+      github.repository == 'binmod-io/python-runtime'
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: "3.43.3"
+
+      - name: Extract changelog for release
+        id: changelog
+        run: |
+          TAG=$(task version:current)
+          PREV_VERSION=$(grep -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | head -n 2 | tail -n 1 | sed -E 's/^## \[([^]]+)\].*/\1/')
+          
+          awk -v tag="$TAG" -v prev="$PREV_VERSION" '
+            # When we hit the tag anchor, start looking but skip the next header line
+            $0 ~ ("^<a name=\"" tag "\"") { printing=0; seen_tag=1; next }
+
+            # Skip the header line itself once after the tag
+            seen_tag && $0 ~ ("^## \\[" tag "\\]") { printing=1; next }
+
+            # Stop printing once we reach the previous version
+            $0 ~ ("^<a name=\"" prev "\"") { exit }
+            $0 ~ ("^## \\[" prev "\\]") { exit }
+
+            # Print content only when inside the tag section
+            printing
+          ' CHANGELOG.md > release_notes.md
+          
+          echo "Release notes for $TAG:"
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,33 @@
+version: '3'
+
+tasks:
+  lint:
+    cmds:
+      - |
+        if [ -n "{{.SRC_DIR}}" ]; then
+          export SRC_DIR="{{.SRC_DIR}}"
+        else
+          export SRC_DIR="{{.PACKAGE_SRC_DIR}}"
+        fi
+      - uvx ruff check $SRC_DIR {{.CLI_ARGS}}
+      - |
+        if [ "{{.FORMAT}}" = "true" ]; then
+          uvx ruff format $SRC_DIR {{.CLI_ARGS}}
+        fi
+
+  lint:all:
+    cmds:
+      - task: lint
+        vars:
+          PACKAGE_SRC_DIR: binmod
+
+  test:
+    cmds:
+      - coverage run -m pytest --junitxml=report.xml {{.CLI_ARGS}} {{.TEST_PATH}}
+      - coverage report
+      - coverage xml
+      - coverage html -d coverage-report
+
+  build:
+    cmds:
+      - uv build --wheel
