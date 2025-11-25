@@ -312,49 +312,22 @@ class HostFnWrapper:
 class _ModuleAPIProxy:
     def __init__(
         self,
-        instance: Instance,
-        store: Store,
-        memory: Memory,
-        guest_alloc: Func,
-        guest_dealloc: Func,
+        module: Module,
     ) -> None:
-        self._instance = instance
-        self._store = store
-        self._memory = memory
-        self._guest_alloc = guest_alloc
-        self._guest_dealloc = guest_dealloc
+        self._module = module
 
 
 class SyncModuleAPIProxy(_ModuleAPIProxy):
     def __getattr__(self, name: str) -> Callable[..., Any]:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return ModuleFnWrapper(
-                name=name,
-                instance=self._instance,
-                store=self._store,
-                memory=self._memory,
-                guest_alloc=self._guest_alloc,
-                guest_dealloc=self._guest_dealloc,
-            )(
-                *args, **kwargs
-            )
+            return self._module.call(name, args, kwargs)
         return wrapper
 
 
 class AsyncModuleAPIProxy(_ModuleAPIProxy):
     def __getattr__(self, name: str) -> Callable[..., Awaitable[Any]]:
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            return await asyncio.to_thread(
-                ModuleFnWrapper(
-                    name=name,
-                    instance=self._instance,
-                    store=self._store,
-                    memory=self._memory,
-                    guest_alloc=self._guest_alloc,
-                    guest_dealloc=self._guest_dealloc,
-                ),
-                *args, **kwargs
-            )
+            return await self._module.acall(name, args, kwargs)
         return wrapper
 
 
@@ -605,42 +578,14 @@ class Module:
         """
         Get the synchronous API proxy for the module.
         """
-        assert (
-            self._instance is not None
-            and self._store is not None
-            and self._memory is not None
-            and self._guest_alloc is not None
-            and self._guest_dealloc is not None
-        ), "Module not instantiated or missing required components"
-
-        return SyncModuleAPIProxy(
-            instance=self._instance,
-            store=self._store,
-            memory=self._memory,
-            guest_alloc=self._guest_alloc,
-            guest_dealloc=self._guest_dealloc,
-        )
+        return SyncModuleAPIProxy(self)
 
     @property
     def async_api(self) -> AsyncModuleAPIProxy:
         """
         Get the asynchronous API proxy for the module.
         """
-        assert (
-            self._instance is not None
-            and self._store is not None
-            and self._memory is not None
-            and self._guest_alloc is not None
-            and self._guest_dealloc is not None
-        ), "Module not instantiated or missing required components"
-
-        return AsyncModuleAPIProxy(
-            instance=self._instance,
-            store=self._store,
-            memory=self._memory,
-            guest_alloc=self._guest_alloc,
-            guest_dealloc=self._guest_dealloc,
-        )
+        return AsyncModuleAPIProxy(self)
 
     @classmethod
     def from_file(
@@ -705,6 +650,85 @@ class Module:
 
     def __add__(self, other: Module) -> Self:
         return self.add_module(other)
+
+    def call(
+        self,
+        func: str,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None
+    ) -> Any:
+        """
+        Call a function in the module.
+
+        :param func: The name of the function to call.
+        :type func: str
+        :param args: The arguments to pass to the function.
+        :type args: tuple[Any, ...] | None
+        :param kwargs: The keyword arguments to pass to the function.
+        :type kwargs: dict[str, Any] | None
+        :return: The result of the function call.
+        :rtype: Any
+        :raises AttributeError: If the function is not found in the module.
+        """
+        assert (
+            self._instance is not None
+            and self._store is not None
+            and self._memory is not None
+            and self._guest_alloc is not None
+            and self._guest_dealloc is not None
+        ), "Module not instantiated or missing required components"
+
+        return ModuleFnWrapper(
+            name=func,
+            instance=self._instance,
+            store=self._store,
+            memory=self._memory,
+            guest_alloc=self._guest_alloc,
+            guest_dealloc=self._guest_dealloc,
+        )(
+            *(args or ()),
+            **(kwargs or {}),
+        )
+
+    async def acall(
+        self,
+        func: str,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None
+    ) -> Any:
+        """
+        Asynchronously call a function in the module.
+
+        :param func: The name of the function to call.
+        :type func: str
+        :param args: The arguments to pass to the function.
+        :type args: tuple[Any, ...] | None
+        :param kwargs: The keyword arguments to pass to the function.
+        :type kwargs: dict[str, Any] | None
+        :return: The result of the function call.
+        :rtype: Any
+        :raises AttributeError: If the function is not found in the module.
+        """
+        assert (
+            self._instance is not None
+            and self._store is not None
+            and self._memory is not None
+            and self._guest_alloc is not None
+            and self._guest_dealloc is not None
+        ), "Module not instantiated or missing required components"
+
+        return await asyncio.to_thread(
+            ModuleFnWrapper(
+                name=func,
+                instance=self._instance,
+                store=self._store,
+                memory=self._memory,
+                guest_alloc=self._guest_alloc,
+                guest_dealloc=self._guest_dealloc,
+            ),
+            *(args or ()),
+            **(kwargs or {}),
+        )
 
     def add_module(self, module: Module) -> Self:
         """
