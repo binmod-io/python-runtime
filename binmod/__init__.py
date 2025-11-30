@@ -5,6 +5,7 @@ import os
 import sys
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
 from inspect import signature
 from os import PathLike
 from pathlib import Path
@@ -44,20 +45,52 @@ def get_obj_discriminator(value: Any) -> str:
     return getattr(value, "object", "")
 
 
-class ModuleFeatureFlags(BaseModel):
+class ModuleCompiler(str, Enum):
     """
-    Available WebAssembly feature flags.
+    Enum for selecting the module compiler strategy.
     """
-    threads: bool = False
+    auto = "auto"
+    cranelift = "cranelift"
+
+
+class ModuleConfig(BaseModel):
+    """
+    Module configuration options.
+    """
+    compiler: ModuleCompiler = ModuleCompiler.auto
+    epoch_interruption: bool = False
+    consume_fuel: bool = False
+    cache: bool = False
+    threads: bool = True
     tail_call: bool = False
-    reference_types: bool = False
-    simd: bool = False
+    simd: bool = True
     relaxed_simd: bool = False
     relaxed_simd_deterministic: bool = False
-    bulk_memory: bool = False
-    multi_value: bool = False
-    multi_memory: bool = False
     memory64: bool = False
+
+    def to_config(self) -> Config:
+        config = Config()
+        config.epoch_interruption = self.epoch_interruption
+        config.consume_fuel = self.consume_fuel
+        config.wasm_threads = self.threads
+        config.wasm_tail_call = self.tail_call
+        config.wasm_simd = self.simd
+        config.wasm_relaxed_simd = self.relaxed_simd
+        config.wasm_relaxed_simd_deterministic = self.relaxed_simd_deterministic
+        config.wasm_memory64 = self.memory64
+        config.strategy = self.compiler.value
+        config.wasm_multi_value = True
+        config.parallel_compilation = True
+
+        if self.compiler == ModuleCompiler.cranelift:
+            config.cranelift_opt_level = "speed"
+
+        # Note: Caching can not be explicitly disabled so we only
+        # set the var if it is True.
+        if self.cache:
+            config.cache = self.cache
+
+        return config
 
 
 class ModuleLimits(BaseModel):
@@ -65,10 +98,6 @@ class ModuleLimits(BaseModel):
     WebAssembly module limits.
     """
     memory_size: int = -1
-    table_elements: int = -1
-    instances: int = -1
-    tables: int = -1
-    memories: int = -1
 
 
 class ModuleEnv(BaseModel):
@@ -87,11 +116,42 @@ class ModuleEnv(BaseModel):
         return cls(
             args=sys.argv[1:],
             env=dict(os.environ),
-            mount={
-                "/tmp": os.path.join(os.getcwd(), "tmp"),
-                "/var": os.path.join(os.getcwd(), "var"),
-            },
         )
+
+    @classmethod
+    def inherit_args(cls) -> ModuleEnv:
+        """
+        Inherit the current process arguments.
+        """
+        return cls(
+            args=sys.argv[1:],
+        )
+
+    @classmethod
+    def inherit_env(cls) -> ModuleEnv:
+        """
+        Inherit the current process environment variables.
+        """
+        return cls(
+            env=dict(os.environ),
+        )
+
+    def to_wasi_config(self) -> WasiConfig:
+        wasi = WasiConfig()
+
+        if self.args:
+            wasi.argv = self.args
+        if self.env:
+            wasi.env = list(self.env.items())
+        if self.mount:
+            for guest_path, host_path in self.mount.items():
+                # TODO: Support read only mounts
+                wasi.preopen_dir(guest_path, host_path)
+
+        wasi.inherit_stdout()
+        wasi.inherit_stderr()
+
+        return wasi
 
 
 @dataclass
@@ -342,14 +402,11 @@ class Module:
         environment: ModuleEnv | None = None,
         namespace: str | None = None,
         host_fns: dict[str, Callable[..., Any]] | None = None,
-        compilation_strategy: Literal["auto", "cranelift"] = "auto",
-        feature_flags: ModuleFeatureFlags | None = None,
+        config: ModuleConfig | None = None,
         limits: ModuleLimits | None = None,
         modules: list[Module] | None = None,
-        cache: bool = False,
-        epoch_interruption: bool = False,
-        consume_fuel: bool = False,
         fuel: int = 0,
+        epoch_deadline: int = 0,
     ) -> None:
         """
         Initialize the Module instance.
@@ -364,20 +421,12 @@ class Module:
         :type namespace: str | None
         :param host_fns: A dictionary of host functions to register.
         :type host_fns: dict[str, Callable[..., Any]] | None
-        :param compilation_strategy: The compilation strategy to use.
-        :type compilation_strategy: Literal["auto", "cranelift"]
-        :param feature_flags: Feature flags for the module.
-        :type feature_flags: ModuleFeatureFlags | None
+        :param config: The configuration for the module.
+        :type config: ModuleConfig | None
         :param limits: The limits for the module.
         :type limits: ModuleLimits | None
         :param modules: A list of modules to link with.
         :type modules: list[Module] | None
-        :param cache: Whether to enable caching.
-        :type cache: bool
-        :param epoch_interruption: Whether to enable epoch interruption.
-        :type epoch_interruption: bool
-        :param consume_fuel: Whether to consume fuel.
-        :type consume_fuel: bool
         :param fuel: The initial fuel amount.
         :type fuel: int
         """
@@ -390,14 +439,8 @@ class Module:
         self._modules = modules or []
         self._linked_modules: set[str] = set()
 
-        self._config = self._build_config(
-            compilation_strategy=compilation_strategy,
-            feature_flags=feature_flags,
-            cache=cache,
-            epoch_interruption=epoch_interruption,
-            consume_fuel=consume_fuel,
-        )
-        self._engine = Engine(self._config)
+        self._config = config or ModuleConfig()
+        self._engine = Engine(self._config.to_config())
         self._store = Store(self._engine)
         self._linker = Linker(self._engine)
         self._module = WasmModule(self._engine, binary)
@@ -410,67 +453,14 @@ class Module:
         if limits:
             self._store.set_limits(
                 memory_size=limits.memory_size,
-                table_elements=limits.table_elements,
-                instances=limits.instances,
-                tables=limits.tables,
-                memories=limits.memories,
             )
         if fuel:
             self._store.set_fuel(fuel)
+        if epoch_deadline:
+            self._store.set_epoch_deadline(epoch_deadline)
 
         for module in self._modules:
             self.link_module(module)
-
-    def _build_config(
-        self,
-        compilation_strategy: Literal["auto", "cranelift"] = "auto",
-        feature_flags: ModuleFeatureFlags | None = None,
-        cache: bool = False,
-        epoch_interruption: bool = False,
-        consume_fuel: bool = False,
-    ) -> Config:
-        config = Config()
-        config.epoch_interruption = epoch_interruption
-        config.consume_fuel = consume_fuel
-
-        if feature_flags:
-            config.wasm_threads = feature_flags.threads
-            config.wasm_tail_call = feature_flags.tail_call
-            config.wasm_reference_types = feature_flags.reference_types
-            config.wasm_simd = feature_flags.simd
-            config.wasm_bulk_memory = feature_flags.bulk_memory
-            config.wasm_multi_value = feature_flags.multi_value
-            config.wasm_multi_memory = feature_flags.multi_memory
-            config.wasm_memory64 = feature_flags.memory64
-
-        config.strategy = compilation_strategy
-
-        # Note: Caching can not be explicitly disabled so we only
-        # set the var if it is True.
-        if cache:
-            config.cache = cache
-
-        return config
-
-    def _build_env(
-        self,
-        environment: ModuleEnv | None = None,
-    ) -> None:
-        wasi = WasiConfig()
-
-        if environment and environment.args:
-            wasi.argv = environment.args
-        if environment and environment.env:
-            wasi.env = list(environment.env.items())
-        if environment and environment.mount:
-            for guest_path, host_path in environment.mount.items():
-                wasi.preopen_dir(guest_path, host_path)
-
-        wasi.inherit_stdout()
-        wasi.inherit_stderr()
-
-        self._linker.define_wasi()
-        self._store.set_wasi(wasi)
 
     def _register_host_fn(self, name: str, func: Callable[..., Any]) -> None:
         self._host_fn_wrappers[name] = HostFnWrapper(func)
@@ -595,12 +585,8 @@ class Module:
         environment: ModuleEnv | None = None,
         namespace: str | None = None,
         host_fns: dict[str, Callable[..., Any]] | None = None,
-        compilation_strategy: Literal["auto", "cranelift"] = "auto",
-        feature_flags: ModuleFeatureFlags | None = None,
+        config: ModuleConfig | None = None,
         limits: ModuleLimits | None = None,
-        cache: bool = False,
-        epoch_interruption: bool = False,
-        consume_fuel: bool = False,
         fuel: int = 0,
     ) -> Module:
         """
@@ -616,18 +602,10 @@ class Module:
         :type namespace: str | None
         :param host_fns: A dictionary of host functions to register.
         :type host_fns: dict[str, Callable[..., Any]] | None
-        :param compilation_strategy: The compilation strategy to use.
-        :type compilation_strategy: Literal["auto", "cranelift"]
-        :param feature_flags: Feature flags for the module.
-        :type feature_flags: ModuleFeatureFlags | None
+        :param config: The configuration for the module.
+        :type config: ModuleConfig | None
         :param limits: The limits for the module.
         :type limits: ModuleLimits | None
-        :param cache: Whether to enable caching.
-        :type cache: bool
-        :param epoch_interruption: Whether to enable epoch interruption.
-        :type epoch_interruption: bool
-        :param consume_fuel: Whether to consume fuel.
-        :type consume_fuel: bool
         :param fuel: The initial fuel amount.
         :type fuel: int
         :return: A Module instance.
@@ -639,12 +617,8 @@ class Module:
             environment=environment,
             namespace=namespace,
             host_fns=host_fns,
-            compilation_strategy=compilation_strategy,
-            feature_flags=feature_flags,
+            config=config,
             limits=limits,
-            cache=cache,
-            epoch_interruption=epoch_interruption,
-            consume_fuel=consume_fuel,
             fuel=fuel,
         )
 
@@ -785,7 +759,8 @@ class Module:
                 module.instantiate()
             self._link_module(module)
 
-        self._build_env(environment=self._environment)
+        self._linker.define_wasi()
+        self._store.set_wasi(self._environment.to_wasi_config())
         self._register_host_fns(host_fns=self._host_fns)
 
         self._instance = self._linker.instantiate(self._store, self._module)
@@ -828,4 +803,14 @@ class Module:
         :type epoch_deadline: bool
         """
         self._store.set_epoch_deadline(epoch_deadline)
+        return self
+
+    def increment_epoch(self) -> Self:
+        """
+        Increment the epoch for the module.
+
+        :return: The current module instance.
+        :rtype: Self
+        """
+        self._engine.increment_epoch()
         return self
