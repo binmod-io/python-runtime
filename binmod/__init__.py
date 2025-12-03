@@ -549,6 +549,20 @@ class Module:
         )
         self._linked_modules.add(module.name)
 
+    def _run_initialize(self) -> None:
+        assert self._instance is not None, "Module not instantiated"
+        assert self._exports is not None, "Module exports not available"
+
+        # If there is an `_initialize` function, invoke it directly
+        # via wasmtime
+        initialize_fn = self._exports.get("_initialize")
+        if initialize_fn and isinstance(initialize_fn, Func):
+            initialize_fn(self._store)
+
+        # Now we invoke `initialize` if it exists for the binmod protocol
+        with suppress(AttributeError):
+            self.api.initialize()
+
     @property
     def instantiated(self) -> bool:
         """
@@ -770,9 +784,7 @@ class Module:
         self._guest_dealloc = cast(Func, self._exports["guest_dealloc"])
 
         self._bind_host_fns()
-
-        with suppress(AttributeError):
-            self.api.initialize()
+        self._run_initialize()
 
         return self
 
